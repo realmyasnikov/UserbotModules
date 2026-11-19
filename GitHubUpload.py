@@ -1,6 +1,7 @@
 # meta developer: @realmyasnikov
 # requires: aiohttp
 
+import asyncio
 import base64
 import io
 
@@ -12,7 +13,7 @@ from .. import loader, utils
 
 @loader.tds
 class GitHubUploadMod(loader.Module):
-    """Загружает новые модули (.py) в репозиторий GitHub и удаляет их"""
+    """Загружает модули (.py) в репозиторий GitHub, удаляет их и показывает список"""
 
     strings = {"name": "GitHubUpload"}
 
@@ -200,3 +201,77 @@ class GitHubUploadMod(loader.Module):
             await utils.answer(message, f"🗑 Модуль <b>{utils.escape_html(name)}</b> удалён из репозитория")
         else:
             await utils.answer(message, f"❌ Ошибка GitHub: <code>{utils.escape_html(info)}</code>")
+
+    async def _list(self):
+        repo, branch = self._repo(), self._branch()
+        base = f"https://api.github.com/repos/{repo}"
+
+        async with aiohttp.ClientSession(headers=self._headers()) as session:
+            async with session.get(f"{base}/contents/", params={"ref": branch}) as r:
+                body = await r.json()
+                if r.status != 200:
+                    msg = body.get("message") if isinstance(body, dict) else None
+                    return None, msg or f"HTTP {r.status}"
+
+            files = [
+                f for f in body
+                if f.get("type") == "file" and f["name"].lower().endswith(".py")
+            ]
+
+            async def last_commit(f):
+                params = {"path": f["path"], "sha": branch, "per_page": 1}
+                async with session.get(f"{base}/commits", params=params) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        if data:
+                            c = data[0]["commit"]
+                            return f["name"], c["message"].split("\n")[0], c["committer"]["date"]
+                return f["name"], "", ""
+
+            results = await asyncio.gather(*(last_commit(f) for f in files))
+
+        # сначала самые свежие
+        results = sorted(results, key=lambda x: x[2], reverse=True)
+        return results, None
+
+    @loader.command(ru_doc="показать модули из репозитория GitHub")
+    async def gitlist(self, message: Message):
+        """show modules from the GitHub repository"""
+        err = self._config_error()
+        if err:
+            await utils.answer(message, err)
+            return
+
+        await utils.answer(message, "⏳ Загружаю список...")
+        results, error = await self._list()
+
+        if error:
+            await utils.answer(message, f"❌ Ошибка GitHub: <code>{utils.escape_html(error)}</code>")
+            return
+
+        if not results:
+            await utils.answer(message, "📭 В репозитории пока нет модулей .py")
+            return
+
+        repo, branch = self._repo(), self._branch()
+        blocks = []
+        for name, commit, _ in results:
+            raw = f"https://raw.githubusercontent.com/{repo}/{branch}/{name}"
+            blocks.append(
+                f"📦 <b>{utils.escape_html(name)}</b>\n"
+                f"💬 {utils.escape_html(commit) if commit else '-'}\n"
+                f"🔗 <code>.dlm {raw}</code>"
+            )
+
+        # режем на сообщения до лимита Telegram
+        chunks, current = [], f"📚 <b>Модули в {utils.escape_html(repo)}</b> ({len(blocks)}):\n\n"
+        for b in blocks:
+            if len(current) + len(b) + 2 > 3800:
+                chunks.append(current)
+                current = ""
+            current += b + "\n\n"
+        chunks.append(current)
+
+        await utils.answer(message, chunks[0].rstrip())
+        for chunk in chunks[1:]:
+            await message.respond(chunk.rstrip())
