@@ -70,7 +70,7 @@ class GitHubUploadMod(loader.Module):
                 return False, body.get("message", f"HTTP {r.status}"), None
 
     @loader.command(ru_doc="(в ответ на .py файл) загрузить модуль на GitHub")
-    async def ghup(self, message: Message):
+    async def ghub(self, message: Message):
         """(reply to a .py file) upload the module to GitHub"""
         if not self.config["token"]:
             await utils.answer(message, "❌ Укажи токен: <code>.cfg GitHubUpload</code>")
