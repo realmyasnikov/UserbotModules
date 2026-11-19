@@ -12,7 +12,7 @@ from .. import loader, utils
 
 @loader.tds
 class GitHubUploadMod(loader.Module):
-    """Загружает новые модули (.py) в репозиторий GitHub"""
+    """Загружает новые модули (.py) в репозиторий GitHub и удаляет их"""
 
     strings = {"name": "GitHubUpload"}
 
@@ -38,24 +38,48 @@ class GitHubUploadMod(loader.Module):
             ),
         )
 
-    async def _upload(self, name: str, data: bytes):
-        repo = self.config["repo"].strip().strip("/")
-        branch = self.config["branch"].strip()
-        url = f"https://api.github.com/repos/{repo}/contents/{name}"
-        headers = {
+    def _config_error(self):
+        if not self.config["token"]:
+            return "❌ Укажи токен: <code>.cfg GitHubUpload</code>"
+        if not self.config["repo"] or "/" not in self.config["repo"]:
+            return (
+                "❌ Укажи репозиторий в <code>.cfg GitHubUpload</code> "
+                "в формате <code>ник/репозиторий</code>"
+            )
+        return None
+
+    def _headers(self):
+        return {
             "Authorization": f"Bearer {self.config['token']}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-        async with aiohttp.ClientSession(headers=headers) as session:
+    def _repo(self):
+        return self.config["repo"].strip().strip("/")
+
+    def _branch(self):
+        return self.config["branch"].strip()
+
+    @staticmethod
+    def _fix_name(name: str) -> str:
+        name = name.strip()
+        if name and not name.endswith(".py"):
+            name += ".py"
+        return name
+
+    async def _upload(self, name: str, data: bytes, commit_msg: str):
+        repo, branch = self._repo(), self._branch()
+        url = f"https://api.github.com/repos/{repo}/contents/{name}"
+
+        async with aiohttp.ClientSession(headers=self._headers()) as session:
             sha = None
             async with session.get(url, params={"ref": branch}) as r:
                 if r.status == 200:
                     sha = (await r.json()).get("sha")
 
             payload = {
-                "message": f"{'Update' if sha else 'Add'} {name}",
+                "message": commit_msg or f"{'Update' if sha else 'Add'} {name}",
                 "content": base64.b64encode(data).decode(),
                 "branch": branch,
             }
@@ -69,29 +93,72 @@ class GitHubUploadMod(loader.Module):
                     return True, ("обновлён" if sha else "добавлен"), raw
                 return False, body.get("message", f"HTTP {r.status}"), None
 
-    @loader.command(ru_doc="(в ответ на .py файл) загрузить модуль на GitHub")
-    async def ghub(self, message: Message):
-        """(reply to a .py file) upload the module to GitHub"""
-        if not self.config["token"]:
-            await utils.answer(message, "❌ Укажи токен: <code>.cfg GitHubUpload</code>")
-            return
+    async def _delete(self, name: str):
+        repo, branch = self._repo(), self._branch()
+        url = f"https://api.github.com/repos/{repo}/contents/{name}"
 
-        if not self.config["repo"] or "/" not in self.config["repo"]:
-            await utils.answer(
-                message,
-                "❌ Укажи репозиторий в <code>.cfg GitHubUpload</code> "
-                "в формате <code>ник/репозиторий</code>",
-            )
+        async with aiohttp.ClientSession(headers=self._headers()) as session:
+            async with session.get(url, params={"ref": branch}) as r:
+                if r.status == 404:
+                    return False, "файл не найден в репозитории"
+                if r.status != 200:
+                    body = await r.json()
+                    return False, body.get("message", f"HTTP {r.status}")
+                sha = (await r.json()).get("sha")
+
+            payload = {"message": f"Delete {name}", "sha": sha, "branch": branch}
+            async with session.delete(url, json=payload) as r:
+                if r.status == 200:
+                    return True, None
+                body = await r.json()
+                return False, body.get("message", f"HTTP {r.status}")
+
+    @loader.command(
+        ru_doc="[название.py] [commit message] - (в ответ на .py файл) загрузить модуль на GitHub"
+    )
+    async def ghub(self, message: Message):
+        """[name.py] [commit message] - (reply to a .py file) upload the module to GitHub"""
+        err = self._config_error()
+        if err:
+            await utils.answer(message, err)
             return
 
         reply = await message.get_reply_message()
         if not reply or not reply.file:
-            await utils.answer(message, "❌ Ответь командой на .py файл с модулем")
+            # файл может быть в самом сообщении с командой (подпись к файлу)
+            reply = message if message.file else None
+        if not reply:
+            await utils.answer(
+                message,
+                "❌ Файл не найден. Ответь командой на файл .py "
+                "или отправь файл с подписью <code>.ghub</code>",
+            )
             return
 
-        name = utils.get_args_raw(message).strip() or reply.file.name or ""
-        if not name.endswith(".py"):
-            await utils.answer(message, "❌ Нужен файл .py")
+        args = utils.get_args_raw(message).strip()
+        parts = args.split(maxsplit=1)
+        if parts and parts[0].lower().endswith(".py"):
+            # первое слово - название файла, дальше commit message
+            name = parts[0]
+            commit_msg = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            # название не указано - берём имя файла, весь текст = commit message
+            name = (reply.file.name or "").strip()
+            commit_msg = args
+            if not name and (reply.file.mime_type or "") in (
+                "text/x-python",
+                "text/x-script.python",
+                "application/x-python-code",
+            ):
+                name = "module.py"
+
+        if not name.lower().endswith(".py"):
+            await utils.answer(
+                message,
+                "❌ Нужен файл .py\n"
+                f"Имя файла: <code>{utils.escape_html(name or 'не определено')}</code>\n"
+                "Можно задать вручную: <code>.ghub название.py</code>",
+            )
             return
 
         await utils.answer(message, "⏳ Загружаю на GitHub...")
@@ -99,7 +166,7 @@ class GitHubUploadMod(loader.Module):
         buf = io.BytesIO()
         await self._client.download_media(reply, buf)
 
-        ok, info, raw = await self._upload(name, buf.getvalue())
+        ok, info, raw = await self._upload(name, buf.getvalue(), commit_msg)
 
         if ok:
             await utils.answer(
@@ -108,5 +175,28 @@ class GitHubUploadMod(loader.Module):
                 f"🔗 <code>{raw}</code>\n\n"
                 f"Установка: <code>.dlm {raw}</code>",
             )
+        else:
+            await utils.answer(message, f"❌ Ошибка GitHub: <code>{utils.escape_html(info)}</code>")
+
+    @loader.command(ru_doc="[название] - удалить модуль из репозитория GitHub")
+    async def delhub(self, message: Message):
+        """[name] - delete a module from the GitHub repository"""
+        err = self._config_error()
+        if err:
+            await utils.answer(message, err)
+            return
+
+        args = utils.get_args_raw(message).strip()
+        if not args:
+            await utils.answer(message, "❌ Укажи название: <code>.delhub название</code>")
+            return
+
+        name = self._fix_name(args.split()[0])
+
+        await utils.answer(message, "⏳ Удаляю...")
+        ok, info = await self._delete(name)
+
+        if ok:
+            await utils.answer(message, f"🗑 Модуль <b>{utils.escape_html(name)}</b> удалён из репозитория")
         else:
             await utils.answer(message, f"❌ Ошибка GitHub: <code>{utils.escape_html(info)}</code>")
