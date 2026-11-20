@@ -48,9 +48,6 @@ class AutoClickMod(loader.Module):
         "empty": "No rules",
         "list_head": "<b>Rules:</b>",
         "paused_mark": "[paused]",
-        "btn_pause": "Pause",
-        "btn_start": "Start",
-        "gone": "Rule not found",
         "cfg_delay": "Delay before click (seconds)",
         "cfg_own": "Also click buttons in your own messages",
     }
@@ -84,9 +81,6 @@ class AutoClickMod(loader.Module):
         "empty": "Нет правил",
         "list_head": "<b>Правила:</b>",
         "paused_mark": "[пауза]",
-        "btn_pause": "Пауза",
-        "btn_start": "Старт",
-        "gone": "Правило не найдено",
         "cfg_delay": "Задержка перед нажатием (секунды)",
         "cfg_own": "Нажимать кнопки и в своих сообщениях",
     }
@@ -297,60 +291,24 @@ class AutoClickMod(loader.Module):
             message, self.strings("deleted").format(", ".join(f"#{n}" for n in nums))
         )
 
-    def _render(self):
-        """Builds the list text and one pause/start button per rule"""
+    def _render(self) -> str:
+        """Builds the list text"""
         rules = self._rules()
         if not rules:
-            return self.strings("empty"), []
+            return self.strings("empty")
 
         lines = [self.strings("list_head")]
-        markup = []
         for i, r in enumerate(rules, start=1):
-            off = r.get("off")
-            mark = f" {self.strings('paused_mark')}" if off else ""
+            mark = f" {self.strings('paused_mark')}" if r.get("off") else ""
             msg_t = utils.escape_html(r["msg"]) or self.strings("any")
             btn_t = utils.escape_html(r["btn"]) or self.strings("any")
             lines.append(f"<b>#{i}</b> <code>{r['chat']}</code>: {msg_t} | {btn_t}{mark}")
+        return "\n".join(lines)
 
-            action = self.strings("btn_start" if off else "btn_pause")
-            markup.append(
-                [
-                    {
-                        "text": f"#{i} {action}: {r['btn'] or self.strings('any')}",
-                        "callback": self._toggle,
-                        "args": (r["chat"], r["msg"], r["btn"]),
-                    }
-                ]
-            )
-        return "\n".join(lines), markup
-
-    async def _toggle(self, call, chat: str, msg: str, btn: str):
-        rules = self._rules()
-        for rule in rules:
-            if (rule["chat"], rule["msg"], rule["btn"]) == (chat, msg, btn):
-                rule["off"] = not rule.get("off")
-                break
-        else:
-            await call.answer(self.strings("gone"), show_alert=True)
-            return
-        self._save(rules)
-
-        text, markup = self._render()
-        await call.edit(text, reply_markup=markup)
-
-    @loader.command(ru_doc="Все правила с номерами и кнопками пауза/старт")
+    @loader.command(ru_doc="Все правила с номерами")
     async def aclist(self, message: Message):
-        """All rules with numbers and pause/start buttons"""
-        text, markup = self._render()
-        if not markup:
-            await utils.answer(message, text)
-            return
-
-        try:
-            await self.inline.form(text=text, message=message, reply_markup=markup)
-        except Exception:
-            logger.exception("AutoClick: inline form failed")
-            await utils.answer(message, text)
+        """All rules with numbers"""
+        await utils.answer(message, self._render())
 
     @loader.watcher(only_messages=True)
     async def watcher(self, message: Message):
